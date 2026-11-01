@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Theme colours as RGB channels (see tailwind.config.js). Dark is applied by the .dark class on <html>. */
+:root {
+  --bg: 246 246 243; --surface: 255 255 255; --line: 228 228 223;
+  --ink: 14 14 14; --fg: 14 14 14; --muted: 92 92 87;
+  --due: 196 58 18; --paid: 18 122 75; --link: 26 85 184;
+  color-scheme: light;
+}
+.dark {
+  --bg: 14 14 13; --surface: 26 26 24; --line: 46 46 43;
+  --ink: 52 52 48; --fg: 242 242 238; --muted: 168 168 160;
+  /* Brighter red/green/blue keep 4.5:1 contrast on the dark surfaces. */
+  --due: 255 122 82; --paid: 74 196 138; --link: 127 168 240;
+  color-scheme: dark;
+}
+
+html, body { background: rgb(var(--bg)); color: rgb(var(--fg)); font-family: Geist, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+body { margin: 0; padding-bottom: env(safe-area-inset-bottom); }
+input, textarea, select, button { font: inherit; }
+input, textarea { font-size: 16px; } /* prevents iOS zoom on focus */
+h1, h2, h3 { letter-spacing: -0.03em; }
+
+@layer components {
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-full px-5 min-h-[44px] font-medium transition active:scale-[.98] disabled:opacity-50 border border-transparent; }
+  .btn-primary { @apply bg-ink text-white; }
+  .btn-accent { @apply bg-lime; }
+  .btn-secondary { @apply bg-surface text-fg border-line; }
+  .btn-lg { @apply min-h-[56px] text-base; }
+  .field { @apply w-full rounded-2xl border border-line bg-surface px-4 min-h-[48px] outline-none focus:border-fg; }
+  .label { @apply text-[13px] text-muted mb-1 block; }
+  .card { @apply bg-surface text-fg border border-line rounded-3xl; }
+  .chip { @apply rounded-full border border-line bg-surface text-fg px-3 min-h-[36px] text-[13px]; }
+  .chip-on { @apply bg-ink text-white border-ink; }
+  /* Lime is only ever a background behind dark text, in both themes. */
+  .bg-lime { color: #0E0E0E; }
+}
+
+/* Landing page */
+html { scroll-behavior: smooth; }
+.spin { animation: spin 18s linear infinite; transform-origin: 50% 50%; }
+@keyframes spin { to { transform: rotate(360deg) } }
+.marquee { display: flex; gap: 48px; width: max-content; animation: slide 32s linear infinite; }
+@keyframes slide { to { transform: translateX(-50%) } }
+.faq summary { cursor: pointer; list-style: none; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq[open] .plus { transform: rotate(45deg); }
+/* Devanagari has tall marks above and below the line; the tight English leading makes lines collide. */
+html:is(:lang(hi), :lang(mr)) :is(h1, h2) { line-height: 1.2 !important; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .spin, .marquee { animation: none; } }
