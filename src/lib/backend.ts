@@ -2,7 +2,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { Party, Profile, Txn } from './types'
 import { uid } from './money'
 
-export interface Snapshot { profile: Profile; parties: Party[]; txns: Txn[] }
+export interface Snapshot { profile: Profile; parties: Party[]; txns: Txn[]; created?: boolean /* profile made on this load (first Google sign-in) */ }
 export interface User { id: string; email: string }
 
 export interface Backend {
@@ -10,7 +10,12 @@ export interface Backend {
   getUser(): Promise<User | null>
   signUp(email: string, password: string, businessName: string): Promise<User>
   signIn(email: string, password: string): Promise<User>
+  signInWithGoogle(): Promise<void> // redirects away; the session is picked up on return
+  sendPasswordReset(email: string): Promise<void>
+  updatePassword(password: string): Promise<void>
+  onPasswordRecovery(cb: () => void): void
   signOut(): Promise<void>
+  logEvent(user: User, name: string, props: Record<string, unknown>, at: string): Promise<void>
   load(user: User): Promise<Snapshot>
   saveProfile(user: User, p: Profile): Promise<void>
   addParty(user: User, p: Party): Promise<void>
@@ -45,8 +50,15 @@ function supabaseBackend(sb: SupabaseClient): Backend {
   return {
     mode: 'supabase',
     async getUser() {
-      const { data } = await sb.auth.getSession()
-      return data.session ? toUser(data.session.user) : null
+      const { data, error } = await sb.auth.getSession()
+      if (data.session) return toUser(data.session.user)
+      // Offline with an expired token: the refresh fails, but the user is still signed in on
+      // this phone. Use the stored session so the app opens and the outbox (F26) keeps working.
+      if (error && !navigator.onLine) {
+        const k = Object.keys(localStorage).find((x) => /^sb-.*-auth-token$/.test(x))
+        try { const u = k && JSON.parse(localStorage.getItem(k)!).user; if (u?.id) return toUser(u) } catch { /* fall through */ }
+      }
+      return null
     },
     async signUp(email, password, businessName) {
       const { data, error } = await sb.auth.signUp({ email, password, options: { data: { business_name: businessName } } })
@@ -60,9 +72,29 @@ function supabaseBackend(sb: SupabaseClient): Backend {
       if (error) throw new Error(error.message)
       return toUser(data.user)
     },
+    async signInWithGoogle() {
+      const { error } = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: location.origin + '/' } })
+      if (error) throw new Error(error.message)
+    },
+    async sendPasswordReset(email) {
+      // ?reset=1 survives the PKCE redirect and tells the app to show "Set a new password".
+      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + '/?reset=1' })
+      if (error) throw new Error(error.message)
+    },
+    async updatePassword(password) {
+      const { error } = await sb.auth.updateUser({ password })
+      if (error) throw new Error(error.message)
+    },
+    onPasswordRecovery(cb) {
+      sb.auth.onAuthStateChange((event) => { if (event === 'PASSWORD_RECOVERY') cb() })
+    },
     async signOut() { await sb.auth.signOut() },
+    async logEvent(user, name, props, at) {
+      must(await sb.from('events').insert({ user_id: user.id, name, props, created_at: at }))
+    },
     async load(user) {
       let prof = must(await sb.from('profiles').select('*').eq('id', user.id).maybeSingle()) as Profile | null
+      const created = !prof
       if (!prof) {
         const { data } = await sb.auth.getUser()
         prof = emptyProfile((data.user?.user_metadata?.business_name as string) ?? '')
@@ -71,7 +103,7 @@ function supabaseBackend(sb: SupabaseClient): Backend {
       const parties = await fetchAll<Party>('parties', 'created_at', (q) => q.is('deleted_at', null))
       const ids = new Set(parties.map((p) => p.id))
       const txns = (await fetchAll<Txn>('transactions', 'created_at')).filter((t) => ids.has(t.party_id))
-      return { profile: prof, parties, txns }
+      return { profile: prof, parties, txns, created }
     },
     async saveProfile(user, p) { must(await sb.from('profiles').upsert({ id: user.id, ...p })) },
     async addParty(user, p) { must(await sb.from('parties').insert({ ...p, user_id: user.id })) },
@@ -89,6 +121,7 @@ interface LocalDb {
   session: string | null // email
   users: Record<string, { id: string; hash: string; business: string }>
   data: Record<string, Snapshot>
+  events?: { user_id: string; name: string; props: Record<string, unknown>; created_at: string }[]
 }
 const KEY = 'hisaab:db'
 
@@ -134,7 +167,19 @@ function localBackend(): Backend {
       write(db)
       return { id: u.id, email: e }
     },
+    async signInWithGoogle() { throw new Error('Google sign-in needs the cloud version (connect Supabase).') },
+    async sendPasswordReset() { throw new Error('Password reset needs the cloud version (connect Supabase).') },
+    async updatePassword() { throw new Error('Password reset needs the cloud version (connect Supabase).') },
+    onPasswordRecovery() {},
     async signOut() { const db = read(); db.session = null; write(db) },
+    async logEvent(user, name, props, at) {
+      // Demo mode keeps the last 500 events per browser so the metrics can still be inspected.
+      const db = read()
+      const ev = (db.events ??= [])
+      ev.push({ user_id: user.id, name, props, created_at: at })
+      if (ev.length > 500) ev.splice(0, ev.length - 500)
+      write(db)
+    },
     async load(user) { return structuredClone(read().data[user.id]) },
     async saveProfile(user, p) { edit(user, (s) => { s.profile = p }) },
     async addParty(user, p) { edit(user, (s) => { s.parties.push(p) }) },
@@ -150,4 +195,5 @@ function localBackend(): Backend {
 
 const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
 const key = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
-export const backend: Backend = url && key ? supabaseBackend(createClient(url, key)) : localBackend()
+// PKCE returns to the app with ?code=, which leaves the hash router alone.
+export const backend: Backend = url && key ? supabaseBackend(createClient(url, key, { auth: { flowType: 'pkce' } })) : localBackend()

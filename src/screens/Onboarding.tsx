@@ -20,19 +20,34 @@ const daysAgo = (n: number) => {
 
 /** F15: three-step first-run guide, then an optional sample customer to practise on. */
 export function Onboarding({ done }: { done: (openPartyId?: string) => void }) {
-  const { user, saveParty, saveTxn } = useStore()
+  const { user, profile, saveProfile, saveParty, saveTxn } = useStore()
   const { t } = useI18n()
   const [step, setStep] = useState(0)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  // Google sign-in (F27) has no shop name yet; reminders need one.
+  const [needShop] = useState(() => !profile.business_name)
+  const [shop, setShop] = useState('')
+
+  async function next() {
+    if (step === 0 && needShop) {
+      if (!shop.trim()) return setErr(t('Enter your shop name'))
+      setBusy(true); setErr('')
+      try { await saveProfile({ ...profile, business_name: shop.trim() }) }
+      catch (x) { setErr(t('Could not save: {e}. Try again.', { e: (x as Error).message })); setBusy(false); return }
+      setBusy(false)
+    }
+    setStep(step + 1)
+  }
 
   const finish = () => { markOnboarded(user!.id); done() }
   async function sample() {
     setBusy(true); setErr('')
     try {
+      // Sample entries are not the owner's own, so they stay out of the usage metrics (F22).
       const p = await saveParty({ name: t('Sharma ji (sample)'), phone: '', note: t('Sample customer. Delete it any time from Edit.'), type: 'customer', due_date: null })
-      await saveTxn({ party_id: p.id, type: 'gave', amount: 100000, note: t('Oil, sugar'), txn_date: daysAgo(2) })
-      await saveTxn({ party_id: p.id, type: 'got', amount: 30000, note: 'UPI', txn_date: daysAgo(1) })
+      await saveTxn({ party_id: p.id, type: 'gave', amount: 100000, note: t('Oil, sugar'), txn_date: daysAgo(2) }, { track: false })
+      await saveTxn({ party_id: p.id, type: 'got', amount: 30000, note: 'UPI', txn_date: daysAgo(1) }, { track: false })
       markOnboarded(user!.id)
       done(p.id)
     } catch (x) {
@@ -79,9 +94,15 @@ export function Onboarding({ done }: { done: (openPartyId?: string) => void }) {
   return (
     <main className="mx-auto max-w-md min-h-screen px-5 pt-5 pb-8 flex flex-col">
       <div className="flex items-center justify-between">
-        <button className="btn px-3 -ml-3 text-muted" onClick={finish}>{t('Skip')}</button>
+        {needShop && step === 0 ? <span /> : <button className="btn px-3 -ml-3 text-muted" onClick={finish}>{t('Skip')}</button>}
         <LangToggle />
       </div>
+      {needShop && step === 0 && (
+        <div className="mt-6">
+          <label className="label" htmlFor="shop">{t('Your shop name (shown in reminders)')}</label>
+          <input id="shop" className="field" value={shop} onChange={(e) => { setShop(e.target.value); setErr('') }} placeholder="Sharma General Store" autoComplete="organization" />
+        </div>
+      )}
       <p className="font-mono text-xs text-muted mt-8">{t('Step {n} of {m}', { n: step + 1, m: steps.length })}</p>
       <h1 className="text-[30px] leading-tight font-semibold mt-2">{s.title}</h1>
       <p className="text-muted mt-3">{s.body}</p>
@@ -96,7 +117,7 @@ export function Onboarding({ done }: { done: (openPartyId?: string) => void }) {
         {!last ? (
           <div className="flex gap-3">
             {step > 0 && <button className="btn btn-secondary btn-lg flex-1" onClick={() => setStep(step - 1)}>{t('Back')}</button>}
-            <button className="btn btn-primary btn-lg flex-[2]" onClick={() => setStep(step + 1)}>{t('Next')}</button>
+            <button className="btn btn-primary btn-lg flex-[2]" onClick={next} disabled={busy}>{t('Next')}</button>
           </div>
         ) : (
           <>

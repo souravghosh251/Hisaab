@@ -49,7 +49,8 @@ export function useToast() {
     return () => clearTimeout(t)
   }, [toast])
   const el = toast && (
-    <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 w-[calc(100%-32px)] max-w-sm" role="status">
+    // Top of the screen: the bottom holds the quick-entry bar and entry buttons, which must stay tappable.
+    <div className="fixed top-[calc(env(safe-area-inset-top)+12px)] left-1/2 z-50 -translate-x-1/2 w-[calc(100%-32px)] max-w-sm" role="status">
       <div className="flex items-center justify-between gap-3 rounded-full bg-ink text-white pl-5 pr-2 py-2 shadow-lg">
         <span className="text-sm">{toast.msg}</span>
         {toast.undo && (

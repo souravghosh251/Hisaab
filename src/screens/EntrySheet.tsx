@@ -7,7 +7,7 @@ import { MAX_RUPEES, type Party, type Txn, type TxnType } from '../lib/types'
 import { rupees, todayStr } from '../lib/money'
 
 export function EntrySheet({ party, initialType, txn, onClose, onSaved }: {
-  party: Party; initialType?: TxnType; txn?: Txn; onClose: () => void; onSaved?: (t: Txn, isNew: boolean) => void
+  party: Party; initialType?: TxnType; txn?: Txn; onClose: () => void; onSaved?: (t: Txn & { queued?: boolean }, isNew: boolean) => void
 }) {
   const { saveTxn, deleteTxn, balance } = useStore()
   const { t } = useI18n()
@@ -19,20 +19,24 @@ export function EntrySheet({ party, initialType, txn, onClose, onSaved }: {
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState(false)
 
-  const paise = Number(amt || 0) * 100
+  const [opened] = useState(() => performance.now())
+
+  const paise = Math.round(Number(amt || 0) * 100)
   const signed = (t: TxnType, p: number) => (t === 'gave' ? p : -p)
   const base = balance(party.id) - (txn ? signed(txn.type, txn.amount) : 0)
   const preview = base + signed(type, paise)
   const you = party.type === 'customer'
+  // F25b: one tap to settle the whole balance, when this entry type moves it toward zero.
+  const settleType: TxnType = base > 0 ? 'got' : 'gave'
+  const canSettle = !txn && base !== 0 && type === settleType && Math.abs(base) <= MAX_RUPEES * 100
 
-  async function save() {
-    if (paise <= 0) return setErr(t('Enter an amount'))
+  async function save(amount = paise, source: 'ledger' | 'settle' = 'ledger') {
+    if (amount <= 0) return setErr(t('Enter an amount'))
     setBusy(true); setErr('')
     try {
-      const t = await saveTxn({ id: txn?.id, party_id: party.id, type, amount: paise, note: note.trim(), txn_date: date })
+      const t = await saveTxn({ id: txn?.id, party_id: party.id, type, amount, note: note.trim(), txn_date: date, ...(!txn && { source }) }, { ms: performance.now() - opened })
       onSaved?.(t, !txn); onClose()
-    } catch (x) { setErr(t('Could not save: {e}. Your entry is still here, try again.', { e: (x as Error).message })) }
-    setBusy(false)
+    } catch (x) { setErr(t('Could not save: {e}. Your entry is still here, try again.', { e: (x as Error).message })); setBusy(false) }
   }
 
   if (confirm && txn)
@@ -48,6 +52,11 @@ export function EntrySheet({ party, initialType, txn, onClose, onSaved }: {
         <button className={`btn ${type === 'gave' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setType('gave')} aria-pressed={type === 'gave'}>{t(you ? 'You gave' : 'You paid')}</button>
         <button className={`btn ${type === 'got' ? 'btn-accent' : 'btn-secondary'}`} onClick={() => setType('got')} aria-pressed={type === 'got'}>{t(you ? 'You got' : 'Goods received')}</button>
       </div>
+      {canSettle && (
+        <button className="btn btn-accent btn-lg w-full mb-1" disabled={busy} onClick={() => save(Math.abs(base), 'settle')}>
+          {t(type === 'got' ? (you ? 'Got full {a}' : 'Received full {a}') : (you ? 'Gave full {a}' : 'Paid full {a}'), { a: rupees(Math.abs(base)) })}
+        </button>
+      )}
       <div className="text-center my-4">
         <div className="font-mono text-6xl tracking-tight" aria-live="polite">₹{amt ? new Intl.NumberFormat('en-IN').format(Number(amt)) : '0'}</div>
         <div className="text-sm text-muted mt-2">
@@ -61,7 +70,7 @@ export function EntrySheet({ party, initialType, txn, onClose, onSaved }: {
       </div>
       <Keypad value={amt} onChange={setAmt} max={MAX_RUPEES} />
       {err && <p className="text-due text-sm mt-3" role="alert">{err}</p>}
-      <button className="btn btn-accent btn-lg w-full mt-3" disabled={busy || paise <= 0} onClick={save}>{busy ? t('Saving…') : t('Save entry')}</button>
+      <button className="btn btn-accent btn-lg w-full mt-3" disabled={busy || paise <= 0} onClick={() => save()}>{busy ? t('Saving…') : t('Save entry')}</button>
       {txn && <button className="btn btn-secondary w-full mt-2 text-due" onClick={() => setConfirm(true)}>{t('Delete entry')}</button>}
     </Sheet>
   )

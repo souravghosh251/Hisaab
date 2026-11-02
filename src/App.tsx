@@ -3,7 +3,7 @@ import { StoreProvider, useStore } from './lib/store'
 import { I18nProvider, useI18n } from './lib/i18n'
 import { ThemeProvider } from './lib/theme'
 import { useToast } from './components/ui'
-import { Auth } from './screens/Auth'
+import { Auth, SetPassword } from './screens/Auth'
 import { Home } from './screens/Home'
 import { Ledger } from './screens/Ledger'
 import { Settings } from './screens/Settings'
@@ -25,7 +25,7 @@ function useRoute() {
 const standalone = () => matchMedia('(display-mode: standalone)').matches || (navigator as { standalone?: boolean }).standalone === true
 
 function Shell() {
-  const { user, ready, parties } = useStore()
+  const { user, ready, parties, recovery } = useStore()
   const { r, go } = useRoute()
   const { show, el } = useToast()
   const { t } = useI18n()
@@ -38,6 +38,7 @@ function Shell() {
     }
     return <Landing start={() => go('signup')} login={() => go('login')} />
   }
+  if (recovery) return <><SetPassword done={() => show(t('Password updated'))} />{el}</>
   if (parties.length === 0 && !isOnboarded(user.id)) {
     return <Onboarding done={(id) => { if (id) go('p/' + id); rerender((n) => n + 1) }} />
   }

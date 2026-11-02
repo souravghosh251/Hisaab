@@ -2,9 +2,11 @@ import { useState } from 'react'
 import { useStore } from '../lib/store'
 import { useI18n, LangToggle } from '../lib/i18n'
 import { useTheme } from '../lib/theme'
+import { Confirm } from '../components/ui'
 
 export function Settings({ back }: { back: () => void }) {
-  const { profile, saveProfile, signOut, user, mode } = useStore()
+  const { profile, saveProfile, signOut, user, mode, pending } = useStore()
+  const [askOut, setAskOut] = useState(false)
   const { t } = useI18n()
   const { pref, setPref } = useTheme()
   const [p, setP] = useState(profile)
@@ -46,7 +48,16 @@ export function Settings({ back }: { back: () => void }) {
       </form>
       <div className="mt-8 border-t border-line pt-5 text-sm text-muted">
         <p>{t('Signed in as {e}', { e: user?.email ?? '' })}{mode === 'local' ? t(' (demo mode, this browser only)') : ''}</p>
-        <button className="btn btn-secondary mt-3" onClick={signOut}>{t('Log out')}</button>
+        <button className="btn btn-secondary mt-3" onClick={() => (pending > 0 ? setAskOut(true) : signOut())}>{t('Log out')}</button>
+        {askOut && (
+          <Confirm
+            title={t('Log out with unsynced changes?')}
+            body={t('{n} changes are saved only on this phone. They will sync the next time you log in here. Logging in on another phone will not show them until then.', { n: pending })}
+            confirmLabel={t('Log out')}
+            onCancel={() => setAskOut(false)}
+            onConfirm={() => { setAskOut(false); signOut() }}
+          />
+        )}
         <p className="mt-6 text-xs">{t('Privacy: we store only names, phone numbers and amounts. No ads, no third-party trackers.')}</p>
       </div>
     </main>

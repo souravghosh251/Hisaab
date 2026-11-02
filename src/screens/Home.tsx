@@ -1,37 +1,44 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Avatar, Balance } from '../components/ui'
 import { useStore } from '../lib/store'
 import { useI18n } from '../lib/i18n'
 import { balanceOf, formatDate, rupees, todayStr } from '../lib/money'
-import { parseQuickEntry } from '../lib/quickEntry'
-import type { PartyType } from '../lib/types'
+import { parseQuickEntry, type QuickResult } from '../lib/quickEntry'
+import { searchParties } from '../lib/search'
+import type { Party, PartyType } from '../lib/types'
 import { PartySheet } from './PartySheet'
 import { BulkReminderSheet } from './BulkReminderSheet'
+import { savedMsg } from './Ledger'
 
-type Sort = 'amount' | 'due'
+type Sort = 'recent' | 'amount' | 'due'
+type Parsed = Extract<QuickResult, { kind: 'pick' }> | Extract<QuickResult, { kind: 'new' }>
 
 export function Home({ open, goSettings, toast }: { open: (id: string) => void; goSettings: () => void; toast: (m: string, undo?: () => void) => void }) {
-  const { parties, byParty, txns, profile, saveTxn, deleteTxn } = useStore()
+  const { parties, byParty, txns, profile, saveTxn, deleteTxn, lastActivity, pending, syncError, retrySync, discardFailed } = useStore()
   const { t } = useI18n()
   const [bulk, setBulk] = useState(false)
   const [tab, setTab] = useState<PartyType>('customer')
   const [q, setQ] = useState('')
-  const [sort, setSort] = useState<Sort>('amount')
-  const [adding, setAdding] = useState(false)
+  const [sort, setSort] = useState<Sort>('recent')
+  const [adding, setAdding] = useState<null | { name?: string; then?: Parsed }>(null)
   const [quick, setQuick] = useState('')
   const [quickErr, setQuickErr] = useState('')
+  const [unsure, setUnsure] = useState<Parsed | null>(null) // quick entry that needs a pick or a new customer
+  const typedAt = useRef<number | null>(null) // F22: when the owner started typing this quick entry
 
   const list = useMemo(() => parties.filter((p) => p.type === tab), [parties, tab])
   const rows = useMemo(() => {
-    const ql = q.trim().toLowerCase()
-    return list
-      .filter((p) => !ql || p.name.toLowerCase().includes(ql) || p.phone.includes(ql))
-      .map((p) => ({ p, bal: balanceOf(byParty.get(p.id) ?? []) }))
-      .sort((a, b) =>
-        sort === 'amount'
-          ? Math.abs(b.bal) - Math.abs(a.bal)
-          : (a.p.due_date ?? '9999').localeCompare(b.p.due_date ?? '9999') || Math.abs(b.bal) - Math.abs(a.bal))
-  }, [list, byParty, q, sort])
+    const found = q.trim() ? searchParties(q, list) : list
+    const withBal = found.map((p) => ({ p, bal: balanceOf(byParty.get(p.id) ?? []) }))
+    // While searching, keep the best matches first; otherwise pins, then the chosen sort.
+    if (q.trim()) return withBal
+    const by = {
+      recent: (a: typeof withBal[0], b: typeof withBal[0]) => lastActivity(b.p.id).localeCompare(lastActivity(a.p.id)),
+      amount: (a: typeof withBal[0], b: typeof withBal[0]) => Math.abs(b.bal) - Math.abs(a.bal),
+      due: (a: typeof withBal[0], b: typeof withBal[0]) => (a.p.due_date ?? '9999').localeCompare(b.p.due_date ?? '9999') || Math.abs(b.bal) - Math.abs(a.bal),
+    }[sort]
+    return withBal.sort((a, b) => Number(!!b.p.pinned) - Number(!!a.p.pinned) || by(a, b))
+  }, [list, byParty, q, sort, lastActivity])
 
   // Totals are always over the whole tab, never the filtered view.
   let receivable = 0, payable = 0
@@ -49,24 +56,50 @@ export function Home({ open, goSettings, toast }: { open: (id: string) => void; 
     .sort((a, b) => b.bal - a.bal)
     .slice(0, 5)
 
-  async function submitQuick(e: React.FormEvent) {
-    e.preventDefault()
-    if (!quick.trim()) return
-    const r = parseQuickEntry(quick, list)
-    if (!r.ok) return setQuickErr(t(r.error, r.vars))
+  const you = tab === 'customer'
+  const verb = (type: 'gave' | 'got') => t(type === 'gave' ? (you ? 'Gave' : 'Paid') : (you ? 'Got' : 'Received'))
+
+  async function record(party: Party, r: { type: 'gave' | 'got'; amount: number; note: string }) {
     try {
-      const tx = await saveTxn({ party_id: r.party.id, type: r.type, amount: r.amount, note: r.note, txn_date: today })
-      setQuick(''); setQuickErr('')
-      toast(`${t(r.type === 'gave' ? 'Gave' : 'Got')} ${rupees(r.amount)} · ${r.party.name}`, () => { deleteTxn(tx.id).catch(() => toast(t('Could not undo'))) })
+      const ms = typedAt.current !== null ? performance.now() - typedAt.current : undefined
+      const tx = await saveTxn({ party_id: party.id, type: r.type, amount: r.amount, note: r.note, txn_date: today, source: 'quick' }, { ms })
+      setQuick(''); setQuickErr(''); setUnsure(null); typedAt.current = null
+      const where = tx.queued ? ` · ${savedMsg(t, true)}` : ''
+      toast(`${verb(r.type)} ${rupees(r.amount)} · ${party.name}${where}`, () => { deleteTxn(tx.id).catch(() => toast(t('Could not undo'))) })
     } catch (x) { setQuickErr(t('Could not save: {e}. Try again.', { e: (x as Error).message })) }
   }
 
+  async function submitQuick(e: React.FormEvent) {
+    e.preventDefault()
+    if (!quick.trim()) return
+    const r = parseQuickEntry(quick, list, tab)
+    if (r.ok) return record(r.party, r)
+    if (r.kind === 'error') { setUnsure(null); return setQuickErr(t(r.error)) }
+    setQuickErr(''); setUnsure(r) // F25c: never a dead end; offer chips or "Add and record"
+  }
+
   return (
-    <main className="mx-auto max-w-md pb-40">
+    <main className="mx-auto max-w-md pb-48">
       <header className="flex items-center justify-between px-5 pt-5 pb-3">
         <h1 className="text-2xl font-semibold truncate">{profile.business_name || 'Hisaab'}</h1>
         <button className="btn btn-secondary px-4" onClick={goSettings}>{t('Settings')}</button>
       </header>
+
+      {pending > 0 && (
+        <section className={`mx-4 mb-3 rounded-2xl border p-3 text-sm ${syncError ? 'border-due bg-surface' : 'border-line bg-surface'}`} role="status">
+          {syncError ? (
+            <>
+              <p className="text-due font-medium">{t('A change could not be saved to your account: {e}', { e: syncError })}</p>
+              <div className="flex gap-2 mt-2">
+                <button className="btn btn-secondary min-h-[40px] text-sm" onClick={retrySync}>{t('Try again')}</button>
+                <button className="btn btn-secondary min-h-[40px] text-sm text-due" onClick={() => { discardFailed() }}>{t('Discard it')}</button>
+              </div>
+            </>
+          ) : (
+            <p><span className="font-medium">{t('{n} changes saved on this phone', { n: pending })}</span> <span className="text-muted">{t('They will sync when you are online.')}</span></p>
+          )}
+        </section>
+      )}
 
       <section className="mx-4 rounded-[28px] bg-ink text-white p-5" aria-label="Totals">
         <div className="grid grid-cols-2 gap-4">
@@ -108,21 +141,24 @@ export function Home({ open, goSettings, toast }: { open: (id: string) => void; 
 
       <div className="mx-4 mt-4 grid grid-cols-2 gap-1 rounded-full bg-surface border border-line p-1" role="tablist">
         {(['customer', 'supplier'] as const).map((t2) => (
-          <button key={t2} role="tab" aria-selected={tab === t2} className={`rounded-full min-h-[40px] text-sm font-medium ${tab === t2 ? 'bg-ink text-white' : ''}`} onClick={() => setTab(t2)}>
+          <button key={t2} role="tab" aria-selected={tab === t2} className={`rounded-full min-h-[40px] text-sm font-medium ${tab === t2 ? 'bg-ink text-white' : ''}`} onClick={() => { setTab(t2); setUnsure(null); setQuickErr('') }}>
             {t2 === 'customer' ? t('Customers') : t('Suppliers')}
           </button>
         ))}
       </div>
 
       <div className="mx-4 mt-3 flex gap-2">
-        <input className="field flex-1" type="search" placeholder={t(tab === 'customer' ? 'Search customers' : 'Search suppliers')} value={q} onChange={(e) => setQ(e.target.value)} aria-label={t('Search')} />
-        <button className="btn btn-accent px-5" onClick={() => setAdding(true)}>{t('+ Add')}</button>
+        <input className="field flex-1" type="search" placeholder={t(tab === 'customer' ? 'Name, nickname or phone' : 'Search suppliers')} value={q} onChange={(e) => setQ(e.target.value)} aria-label={t('Search')} />
+        <button className="btn btn-accent px-5" onClick={() => setAdding({})}>{t('+ Add')}</button>
       </div>
-      <div className="mx-4 mt-2 flex gap-2 items-center text-sm text-muted">
-        {t('Sort:')}
-        <button className={`chip ${sort === 'amount' ? 'chip-on' : ''}`} onClick={() => setSort('amount')}>{t('Amount')}</button>
-        <button className={`chip ${sort === 'due' ? 'chip-on' : ''}`} onClick={() => setSort('due')}>{t('Oldest due')}</button>
-      </div>
+      {!q.trim() && (
+        <div className="mx-4 mt-2 flex gap-2 items-center text-sm text-muted overflow-x-auto">
+          {t('Sort:')}
+          {(['recent', 'amount', 'due'] as const).map((s) => (
+            <button key={s} className={`chip shrink-0 ${sort === s ? 'chip-on' : ''}`} onClick={() => setSort(s)}>{t(s === 'recent' ? 'Recent' : s === 'amount' ? 'Amount' : 'Oldest due')}</button>
+          ))}
+        </div>
+      )}
 
       <section className="mx-4 mt-3 space-y-2" aria-label="List">
         {list.length === 0 && (
@@ -138,14 +174,18 @@ export function Home({ open, goSettings, toast }: { open: (id: string) => void; 
         {list.length > 0 && rows.length === 0 && <p className="text-center text-muted py-8">{t('No match for “{q}”.', { q })}</p>}
         {rows.map(({ p, bal }) => {
           const late = bal > 0 && p.due_date && p.due_date < today
+          const sub = late ? t('Overdue since {d}', { d: formatDate(p.due_date!) })
+            : p.due_date ? t('Collect by {d}', { d: formatDate(p.due_date) })
+            : [p.alias, p.phone || p.note].filter(Boolean).join(' · ') || '—'
           return (
             <button key={p.id} className="card w-full p-4 flex items-center gap-3 text-left min-h-[68px]" onClick={() => open(p.id)}>
               <Avatar name={p.name} />
               <div className="flex-1 min-w-0">
-                <div className="font-medium truncate">{p.name}</div>
-                <div className={`text-xs truncate ${late ? 'text-due font-medium' : 'text-muted'}`}>
-                  {late ? t('Overdue since {d}', { d: formatDate(p.due_date!) }) : p.due_date ? t('Collect by {d}', { d: formatDate(p.due_date) }) : p.phone || p.note || '—'}
+                <div className="font-medium truncate flex items-center gap-1.5">
+                  {p.pinned && <svg className="shrink-0 text-muted" width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-label={t('Pinned')}><path d="M12 17v5M9 3h6l-1 6 4 4H6l4-4z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" /></svg>}
+                  <span className="truncate">{p.name}</span>
                 </div>
+                <div className={`text-xs truncate ${late ? 'text-due font-medium' : 'text-muted'}`}>{sub}</div>
               </div>
               <Balance paise={bal} />
             </button>
@@ -153,20 +193,49 @@ export function Home({ open, goSettings, toast }: { open: (id: string) => void; 
         })}
       </section>
 
-      {tab === 'customer' && (
-        <form onSubmit={submitQuick} className="fixed bottom-0 inset-x-0 z-30 bg-bg/95 border-t border-line pb-[env(safe-area-inset-bottom)]">
-          <div className="mx-auto max-w-md p-3">
-            {quickErr && <p className="text-due text-xs px-2 pb-2" role="alert">{quickErr}</p>}
-            <div className="flex gap-2">
-              <input className="field font-mono flex-1" placeholder="sharma 420 atta" value={quick} onChange={(e) => { setQuick(e.target.value); setQuickErr('') }} aria-label={t('Quick entry')} autoCapitalize="none" autoCorrect="off" />
-              <button className="btn btn-accent w-12 h-12 !p-0 text-2xl" aria-label="Add quick entry">+</button>
+      <form onSubmit={submitQuick} className="fixed bottom-0 inset-x-0 z-30 bg-bg/95 border-t border-line pb-[env(safe-area-inset-bottom)]">
+        <div className="mx-auto max-w-md p-3">
+          {quickErr && <p className="text-due text-xs px-2 pb-2" role="alert">{quickErr}</p>}
+          {unsure && (
+            <div className="pb-2 px-1" role="group" aria-label={t('Who is it for?')}>
+              <p className="text-xs text-muted pb-1.5">
+                {unsure.kind === 'pick'
+                  ? t('Which one? {a} for “{n}”', { a: `${verb(unsure.type)} ${rupees(unsure.amount)}`, n: unsure.name })
+                  : t('No one called “{n}” yet.', { n: unsure.name })}
+              </p>
+              <div className="flex gap-2 overflow-x-auto">
+                {unsure.kind === 'pick' && unsure.candidates.map((c) => (
+                  <button key={c.id} type="button" className="chip shrink-0 min-h-[40px]" onClick={() => record(c, unsure)}>
+                    {c.name}{c.alias ? <span className="text-muted"> · {c.alias}</span> : null}
+                  </button>
+                ))}
+                <button type="button" className="chip chip-on shrink-0 min-h-[40px]" onClick={() => setAdding({ name: unsure.name, then: unsure })}>
+                  {t(you ? 'Add customer and record' : 'Add supplier and record')}
+                </button>
+              </div>
             </div>
-            <p className="text-[11px] text-muted px-2 pt-1">{t('Name, amount, note. Add “got” for a payment received.')}</p>
+          )}
+          <div className="flex gap-2">
+            <input
+              className="field font-mono flex-1"
+              placeholder={you ? 'sharma 420 atta' : 'agarwal 5000 maal'}
+              value={quick}
+              onChange={(e) => {
+                if (!quick && e.target.value) typedAt.current = performance.now()
+                setQuick(e.target.value); setQuickErr(''); setUnsure(null)
+              }}
+              aria-label={t('Quick entry')} autoCapitalize="none" autoCorrect="off" enterKeyHint="done"
+            />
+            <button className="btn btn-accent w-12 h-12 !p-0 text-2xl" aria-label={t('Quick entry')}>+</button>
           </div>
-        </form>
-      )}
+          <p className="text-[11px] text-muted px-2 pt-1">{t(you ? 'Name, amount, note. Add “got” for a payment received.' : 'Name, amount, note. Add “paid” for a payment you made.')}</p>
+        </div>
+      </form>
       {bulk && <BulkReminderSheet onClose={() => setBulk(false)} />}
-      {adding && <PartySheet type={tab} onClose={() => setAdding(false)} onSaved={(p) => open(p.id)} />}
+      {adding && (
+        <PartySheet type={tab} initialName={adding.name} onClose={() => setAdding(null)}
+          onSaved={(p) => { if (adding.then) record(p, adding.then); else open(p.id) }} />
+      )}
     </main>
   )
 }

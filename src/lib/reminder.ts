@@ -1,22 +1,37 @@
 import { rupees } from './money'
 
-export type Tone = 'polite' | 'festival' | 'hindi'
+export type Tone = 'polite' | 'festival'
+export type MsgLang = 'en' | 'hi' | 'mr'
+
+const templates: Record<MsgLang, Record<Tone, (n: string, a: string, s: string) => string>> = {
+  en: {
+    polite: (n, a, s) => `Hi ${n}, a gentle reminder from ${s}: ${a} is pending. Please pay when convenient. Thank you!`,
+    festival: (n, a, s) => `Hi ${n}, wishing you and your family a happy festive season! A gentle reminder: ${a} is pending at ${s}. Thank you!`,
+  },
+  hi: {
+    polite: (n, a, s) => `नमस्ते ${n} जी, ${s} में आपका ${a} बकाया है। कृपया सुविधा अनुसार भुगतान कर दें। धन्यवाद!`,
+    festival: (n, a, s) => `नमस्ते ${n} जी, आपको और आपके परिवार को त्योहार की शुभकामनाएँ! याद दिला दें, ${s} में आपका ${a} बकाया है। धन्यवाद!`,
+  },
+  mr: {
+    polite: (n, a, s) => `नमस्कार ${n}, ${s} कडे तुमचे ${a} बाकी आहेत. सोयीनुसार भरावेत ही विनंती. धन्यवाद!`,
+    festival: (n, a, s) => `नमस्कार ${n}, तुम्हाला आणि तुमच्या कुटुंबाला सणाच्या शुभेच्छा! आठवण म्हणून, ${s} कडे तुमचे ${a} बाकी आहेत. धन्यवाद!`,
+  },
+}
+const upiLabels: Record<MsgLang, [string, string]> = {
+  en: ['Pay via UPI', 'UPI ID'],
+  hi: ['UPI से भुगतान करें', 'UPI ID'],
+  mr: ['UPI ने पैसे भरा', 'UPI ID'],
+}
 
 export function buildMessage(o: {
-  tone: Tone; name: string; amount: number; shop: string; upiId?: string; includeUpi: boolean
+  tone: Tone; lang?: MsgLang; name: string; amount: number; shop: string; upiId?: string; includeUpi: boolean
 }): string {
-  const amt = rupees(o.amount)
-  let m: string
-  if (o.tone === 'hindi')
-    m = `नमस्ते ${o.name} जी, ${o.shop} में आपका ${amt} बकाया है। कृपया सुविधा अनुसार भुगतान कर दें। धन्यवाद!`
-  else if (o.tone === 'festival')
-    m = `Hi ${o.name}, wishing you and your family a happy festive season! A gentle reminder: ${amt} is pending at ${o.shop}. Thank you!`
-  else
-    m = `Hi ${o.name}, a gentle reminder from ${o.shop}: ${amt} is pending. Please pay when convenient. Thank you!`
+  const lang = o.lang ?? 'en'
+  let m = templates[lang][o.tone](o.name, rupees(o.amount), o.shop)
   if (o.includeUpi && o.upiId) {
-    const link = upiLink(o.upiId, o.shop, o.amount)
+    const [pay, id] = upiLabels[lang]
     // UPI ID as plain text too: upi:// links don't open reliably on iPhone.
-    m += `\n\nPay via UPI: ${link}\nUPI ID: ${o.upiId}`
+    m += `\n\n${pay}: ${upiLink(o.upiId, o.shop, o.amount)}\n${id}: ${o.upiId}`
   }
   return m
 }
